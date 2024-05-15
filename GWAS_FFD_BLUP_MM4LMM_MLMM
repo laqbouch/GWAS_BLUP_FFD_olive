@@ -51,16 +51,140 @@ map <- map[order(map$Pos), ]
 map <- map[order(map$Chr), ]
 #################  Import phenotypic data  #########################################################################
 phenot <- read_excel("Pheno_BLUP_FFD.xlsx")
-head(phenot)
 y_FFD <- phenot$BLUP_FFD_7yrs
 names(y_FFD) <- phenot$Name_on_cluster
-#verifier la distribution
 y <- y_FFD
-length(y)
-ap(y)
 #####verif data sorted
 #order geno to fit pheno
 genot.ok <- genot.ok[match(names(y), rownames(genot.ok)), ]
 plot(match(rownames(genot.ok), names(y)))
 plot(match(map$SNP, colnames(genot.ok)))
+#################  Test GWAS models  #########################################################################
+###structure matrix
+SNMF_Matrix_K3 <- read_csv("SNMF_Matrix_K3.csv")
+SNMF_Matrix_K3 <- SNMF_Matrix_K3[match(rownames(genot.ok), SNMF_Matrix_K3$...1),]
+Q.mat <- sapply(SNMF_Matrix_K3[,2:ncol(SNMF_Matrix_K3)], as.numeric)
+rownames(Q.mat) <- SNMF_Matrix_K3$...1
+colnames(Q.mat)
+#Compare three models: model with kinship only, model with structure only, and model with both
+#kinship matrix
+K_weir <- beta.dosage(genot.ok)
+K_weir <- make.positive.definite(K_weir)
+K.vanraden <- kinship(genot.ok, method = "vanRaden")
+K.vanraden <- make.positive.definite(K.vanraden)
+#change k value
+K <- K.vanraden
+#kinship only model
+mmest_K_test <- MMEst(Y = y,VarList = list(Additive = K, Error = diag(length(y))))
+ap(mmest_K_test)
+AIC_K = -2*(mmest_K_test$NullModel$`LogLik (Reml)`) +2*1 
+BIC_K = -2 * (mmest_K_test$NullModel$`LogLik (Reml)`)+ log(318)*1 
+#kinship and structure model
+mmest_QK_test <- MMEst(Y = y, Cofactor = Q.mat[, 1:2],
+                       VarList = list(Additive = K, Error = diag(length(y))))
+ap(mmest_QK_test)
+AIC_QK = -2*(mmest_QK_test$NullModel$`LogLik (Reml)`) +2*3 
+BIC_QK = -2 * (mmest_QK_test$NullModel$`LogLik (Reml)`)+ log(318)*3 
+#structure only model
+mmest_Q_test <- MMEst(Y = y, Cofactor = Q.mat[, 1:2],
+                      VarList = list(Error = diag(length(y))))
+ap(mmest_Q_test)
+AIC_Q = -2*(mmest_Q_test$NullModel$`LogLik (Reml)`) +2*2
+BIC_Q = -2 * (mmest_Q_test$NullModel$`LogLik (Reml)`)+ log(318)*2 
+################# GWAS using MM4LMM model  #########################################################################
+#Kinship matrix
+# matrix of Weir & Goudet
+K_weir <- beta.dosage(genot.ok)
+K_weir <- make.positive.definite(K_weir)
+# matrix of VanRaden
+K.vanraden <- kinship(genot.ok, method = "vanRaden")
+K.vanraden <- make.positive.definite(K.vanraden)
+#change k value
+K <- K.vanraden
+kinship_name <- "K.vanraden"
+#run model
+mmest_K <- MMEst(Y = y, X = genot.ok, VarList = list(Additive = K, Error = diag(length(y))), Verbose = TRUE,Cofactor = NULL)
+#ap(mmest_K)
+#test of the significance of effects
+out.test_K <- AnovaTest(mmest_K)
+ap(out.test_K)
+res.mm4lmm_K <- cbind(map, P = sapply(out.test_K, function(x){x["Xeffect", "pval"]}))
+ap(res.mm4lmm_K)
+#QQ_plot with -log(p_values)
+qq(res.mm4lmm_K$P, main = paste0("QQ_plot_GWAS_MM4LMM_FFD_",kinship_name))
+#QQ_plot with true values of p_values
+u <- runif(118948,0,1)
+qqplot(u,res.mm4lmm_K$P, main = paste0("QQ_p_values_mm4lmm_FFD_7yrs_",kinship_name))
+#Manhattan plot with only SNPS on chromosome
+res.mm4lmm_K_chr <- subset(res.mm4lmm_K,Chr%in%1:23)
+manhattan(res.mm4lmm_K_chr, chr = "Chr", bp = "Pos", p = "P",
+          suggestiveline = -log10(9.60E-06),
+          col = c("gray0", "chartreuse4"),  
+          genomewideline = -log10(9.60E-06),
+          main = "GWAS_MM4LMM_FFD_WG_SNMFimp_K_FDR_5",
+          ylim = c(0, 7.5),
+          annotatePval = 0.00001)
+###FDR correction
+p_values <- res.mm4lmm_K$P
+p_adjusted <- p.adjust(p_values, method = "fdr")
+p_adjusted_coor <- cbind(res.mm4lmm_K$SNP,res.mm4lmm_K$P,p_adjusted)
+colnames(p_adjusted_coor)= c("SNP","P","p_adjusted")
+p_adjusted_coor <- as.data.frame(p_adjusted_coor)
+###Extract significant (Threshold at 5% FDR)
+signifSNPs <- p_adjusted_coor[p_adjusted_coor$p_adjusted < 0.05,]
+signifSNPs
+###Significant SNP effets 
+effects_sig_SNP <- sapply(mmest_K[signifSNPs$SNP], function(x) x$Beta)[2, ]
+# Convert to data frame
+effects_sig_SNP_df <- data.frame(SNP_name = names(effects_sig_SNP), effects_sig_SNP = effects_sig_SNP, row.names = NULL)
+# Write the data frame to a file in your working directory
+write.table(effects_sig_SNP_df, file = "effects_sig_SNP_FDR5.csv", sep = ",", col.names = TRUE, row.names = TRUE)
+################# GWAS using MLMM model  #########################################################################
+#change k value
+K <- K_weir
+kinship_name <- "K_weir"
+mygwas <- mlmm(Y = y, X = genot.ok, K = K, maxsteps = 7, nbchunks = 2,thresh = 0.0000096)
+#summary of all steps
+step_table <- mygwas$step_table
+write.csv(step_table ,paste0("step_table_", kinship_name,".csv") , row.names=F)
+#variance component
+variance_repartition <-mygwas$RSSout
+#Partition de variance
+plot_step_RSS(mygwas)
+#selection of best model regarding the threshold
+plot_step_table(mygwas, "maxpval")
+#qq plot of the best model regarding the threshold
+qqplot_fwd_GWAS(x = mygwas, nsteps = 7)
+#Coefficients and p-values 
+sig_SNP_FDR5 <- mygwas$opt_thresh$coef
+write.csv(sig_SNP_FDR5 , paste0("sig_SNP_FDR5_MLMM_", kinship_name,".csv"), row.names=T)
+#Illustration of effects
+for (i in mygwas$opt_thresh$cof) {
+  png(file=paste0("Effect_signif_MLMM_SNP_5_FDR_K",i,".png"))
+  boxplot(y ~ genot.ok[, i], varwidth = T, main = i, xlab = "")
+  mtext(text = c("n = ", table(genot.ok[, i])), side = 1,
+        at = c(0.5, 1, 2), line = 3)
+  dev.off()
+}
+#Manhatten plot for the best model
+plot_opt_GWAS(x = mygwas, opt = "thresh", snp_info = map, pval_filt = 0.1)
+step_index <- 4
+pval_step <- mygwas$pval_step[[step_index]]$out
+pval_step_new <- merge(pval_step, map, by = "SNP", all.x = TRUE)
+pval_step_new <- subset(pval_step_new,Chr%in%1:23)
+tail(pval_step_new)
+manhattan(pval_step_new, chr = "Chr", bp = "Pos", p = "pval",
+          suggestiveline = -log10(9.60E-06),
+          col = c("gray0", "chartreuse4"),  
+          genomewideline = -log10(9.60E-06),
+          main = "FFD_BLUP_MLMM_WG",
+          ylim = c(0, 7.5),
+          annotatePval = 0.00001,
+          cex.main = 0.8)
+
+
+
+
+
+
 
