@@ -1,0 +1,249 @@
+#Title: "Genomic Prediction of FFD in cultivated olive"
+#Author: "Laila Aqbouch"
+#contact: "aqbouchlaila@gmail.com"
+#date: 05/12/2023
+library(data.table)  
+library(ggplot2)
+library(apercu)
+library(RColorBrewer)
+library(pals)
+library(glmnet)
+library(doParallel) 
+library(foreach) 
+library(snow) 
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(readxl)
+library(vioplot)
+library(caret)
+###Import genotypic data
+SNP <- read_delim("positions.txt", 
+                  delim = "\t", escape_double = FALSE, 
+                  col_names = FALSE, trim_ws = TRUE)
+names <- read_csv("sample_names.txt", 
+                  col_names = FALSE)
+imputed_geno_LFMM <- read_table("Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_MAF_5_nuclear.lfmm_imputed.lfmm", 
+                                col_names = FALSE)
+genot.imp <- imputed_geno_LFMM
+SNP$positions <- paste(SNP$X1,"_",SNP$X2, sep = "")
+##add cultivar names
+genot.mat <- as.matrix(genot.imp)
+rownames(genot.mat) <- names$X1
+colnames(genot.mat) <- SNP$positions
+#MAF allele should be coded 012
+p <- colMeans(genot.mat) / 2
+q <- 1 - p
+maf <- apply(cbind(p, q), 1, min)
+ap(maf)
+hist(maf, col = "grey", main = "", breaks = 50, xlim = c(0, 0.5))
+##filter MAF at 0.05
+sum(maf < 0.05)
+genot.ok <- genot.mat[, maf >= 0.05]
+dim(genot.ok)
+##verification
+p <- colMeans(genot.ok) / 2
+q <- 1 - p
+maf <- apply(cbind(p, q), 1, min)
+hist(maf, col = "grey", main = "", breaks = 50, xlim = c(0, 0.5))
+#clean environement
+rm(genot.mat, genot.imp, maf, p, q)
+####map
+map <- SNP[, c(3, 1, 2)]
+colnames(map) <- c('SNP','Chr','Pos')
+map$Chr <- sub('9','',map$Chr)
+map$Chr <- sub('s','9',map$Chr)
+map$Chr <- gsub('[Oe_LG]','',map$Chr)
+####Import pheno data
+phenot <- read_excel("Pheno_7yrs_FFD_CP.xlsx")
+phenot <- phenot[,c(1,6)]
+#order geno in same order in pheno
+genot.ok <- genot.ok[match(phenot$Name_on_cluster, rownames(genot.ok)), ]
+plot(match(rownames(genot.ok), phenot$Name_on_cluster))
+phenot <- column_to_rownames(phenot,var = "Name_on_cluster" )
+pheno <- phenot$BLUP_FFD_7yrs
+pheno <- as.numeric(pheno)
+##########################   Fit model and predict    ##########################################################
+resp <- "BLUP_FFD_7yrs"
+### Fit the model with cross-validation
+rsquared_RR_values <- numeric(100)
+cv_errors_RR <- numeric(100)
+##################     alpha = 0 RR model     ########################################
+for (i in 1:100) {
+  cv.geno_RR <- cv.glmnet(x=genot.ok, y=pheno, alpha=0, family="gaussian",
+                          nfolds=5, nlambda=100, parallel=TRUE)
+  min_cv_error <- min(cv.geno_RR$cvm)
+  rsquared_RR <- 1 - min_cv_error / var(pheno)
+  # Store the result in the vector
+  rsquared_RR_values[i] <- rsquared_RR
+  # Store the cross-validation error for the chosen lambda
+  cv_error_RR <- min(cv.geno_RR$cvm)
+  cv_errors_RR[i] <- cv_error_RR
+}
+vioplot(rsquared_RR_values, col="skyblue", names="R-squared (RR)", main="Distribution of R-squared (RR)")
+mean_rsquared_RR <- round(mean(rsquared_RR_values),2)
+# Create a violin plot for cross-validation errors for RR
+vioplot(cv_errors_RR, col="coral3", names="Cross-validation Error (RR)", main="Distribution of Cross-validation Errors (RR)")
+mean_cv_errors_RR <- round(mean(cv_errors_RR),2)
+###########Calculate accuracy of prediction
+correlations_RR <- numeric(100)
+# Create empty vectors to store all predicted and observed values
+all_predicted_values_RR <- numeric(0)
+all_observed_values_RR <- numeric(0)
+for (i in 1:100) {
+  # Create an index for splitting the data into training and validation sets
+  index <- createDataPartition(pheno, p = 4/5, list = FALSE)
+  # Split the data into training and validation sets
+  genot_train <- genot.ok[index, ]
+  genot_valid <- genot.ok[-index, ]
+  pheno_train <- pheno[index]
+  pheno_valid <- pheno[-index]
+  # Perform cross-validation for ridge regression
+  cv.geno_RR <- cv.glmnet(x = genot_train, y = pheno_train, alpha = 0, family = "gaussian",
+                          nfolds = 5, nlambda = 100, parallel = TRUE)
+  # Fit a GLM with RR regularization using the optimal lambda
+  final_model_RR <- glmnet(x = genot_train, y = pheno_train, alpha = 0,
+                           lambda = cv.geno_RR$lambda.min, family = "gaussian")
+  # Predict values on the validation set
+  predicted_values <- predict(final_model_RR, newx = genot_valid, s = cv.geno_RR$lambda.min)
+  # Calculate the correlation between predicted and observed values
+  correlation <- cor(predicted_values, pheno_valid)
+  # Store the correlation in a vector
+  correlations_RR[i] <- correlation
+  # Append the predicted and observed values to the vectors
+  all_predicted_values_RR <- c(all_predicted_values_RR, predicted_values)
+  all_observed_values_RR <- c(all_observed_values_RR, pheno_valid)
+}
+mean(correlations_RR)
+#plot the values of correlations
+vioplot(correlations_RR, col="darkslategray", names="Accuracy (RR)", main="Distribution of Accuracy (RR)",ylim = c(0.3, 0.8))
+# Create a plot for all values
+correlation_RR <- cor(all_predicted_values_RR, all_observed_values_RR)
+plot(all_predicted_values_RR, all_observed_values_RR,
+     xlab = "Predicted Values", ylab = "Observed Values",
+     main = "",
+     col = "black", pch = 16)
+# Add a diagonal line indicating perfect prediction
+abline(a = 0, b = 1, col = "red", lty = 1)
+title(main = paste("Predicted vs Observed RR for 100 Iterations\n",
+                   "Pearson Correlation =", round(correlation_RR, 2)),
+      col.main = "black")
+##################     alpha = 1 LASSO model     ########################################
+# Initialize a vector to store the rsquared_RR values
+rsquared_LASSO_values <- numeric(100)
+cv_errors_LASSO <- numeric(100)
+#model of cross validation
+for (i in 1:100) {
+  cv.geno_LASSO <- cv.glmnet(x=genot.ok, y=pheno, alpha=1, family="gaussian",
+                             nfolds=5, nlambda=100, parallel=TRUE)
+  # Calculate R-squared for Ridge Regression
+  min_cv_error <- min(cv.geno_LASSO$cvm)
+  rsquared_LASSO <- 1 - min_cv_error / var(pheno)
+  # Store the result in the vector
+  rsquared_LASSO_values[i] <- rsquared_LASSO
+  # Store the cross-validation error for the chosen lambda
+  cv_error_LASSO <- min(cv.geno_LASSO$cvm)
+  cv_errors_LASSO[i] <- cv_error_LASSO
+}
+vioplot(rsquared_LASSO_values, col="skyblue", names="R-squared (LASSO)", main="Distribution of R-squared (LASSO)")
+mean_rsquared_LASSO <- round(mean(rsquared_LASSO_values),2)
+# Create a violin plot for cross-validation errors
+vioplot(cv_errors_LASSO, col="coral3", names="Cross-validation Error (LASSO)", main="Distribution of Cross-validation Errors (LASSO)")
+mean_cv_errors_LASSO <- round(mean(cv_errors_LASSO),2)
+#Test the significance of diffrence between LASSO and RR accuracy
+wilcox_result <- wilcox.test(rsquared_LASSO_values, rsquared_RR_values, paired = TRUE,correct = F)
+#calcul accuracy of prediction
+correlations_LASSO <- numeric(100)
+# Create empty vectors to store all predicted and observed values
+all_predicted_values_LASSO <- numeric(0)
+all_observed_values_LASSO <- numeric(0)
+for (i in 1:100) {
+  # Create an index for splitting the data into training and validation sets
+  index <- createDataPartition(pheno, p = 4/5, list = FALSE)
+  # Split the data into training and validation sets
+  genot_train <- genot.ok[index, ]
+  genot_valid <- genot.ok[-index, ]
+  pheno_train <- pheno[index]
+  pheno_valid <- pheno[-index]
+  # Perform cross-validation for ridge regression
+  cv.geno_LASSO <- cv.glmnet(x = genot_train, y = pheno_train, alpha = 1, family = "gaussian",
+                          nfolds = 5, nlambda = 100, parallel = TRUE)
+  # Fit a GLM with RR regularization using the optimal lambda
+  final_model_LASSO <- glmnet(x = genot_train, y = pheno_train, alpha = 1,
+                           lambda = cv.geno_LASSO$lambda.min, family = "gaussian")
+  # Predict values on the validation set
+  predicted_values <- predict(final_model_LASSO, newx = genot_valid, s = cv.geno_LASSO$lambda.min)
+  # Calculate the correlation between predicted and observed values
+  correlation <- cor(predicted_values, pheno_valid)
+  # Store the correlation in a vector
+  correlations_LASSO[i] <- correlation
+  # Append the predicted and observed values to the vectors
+  all_predicted_values_LASSO <- c(all_predicted_values_LASSO, predicted_values)
+  all_observed_values_LASSO <- c(all_observed_values_LASSO, pheno_valid)
+}
+mean(correlations_LASSO)
+vioplot(correlations_LASSO, col="darkslategray", names="Accuracy (LASSO)", main="Distribution of Accuracy (LASSO)",ylim = c(0.3, 0.8))
+# Create a scatter plot for all values
+correlation_LASSO <- cor(all_predicted_values_LASSO, all_observed_values_LASSO)
+plot(all_predicted_values_LASSO, all_observed_values_LASSO,
+     xlab = "Predicted Values", ylab = "Observed Values",
+     main = "",
+     col = "black", pch = 16)
+# Add a diagonal line indicating perfect prediction
+abline(a = 0, b = 1, col = "red", lty = 1)
+# Add Pearson correlation value to the plot
+# Set the main title including the correlation value
+title(main = paste("Predicted vs Observed LASSO for 100 Iterations\n",
+                   "Pearson Correlation =", round(correlation_LASSO, 2)),
+      col.main = "black")
+# combine the two plots
+# Combine the data
+combined_data <- list(correlations_LASSO, correlations_RR)
+# Running the Wilcoxon signed-rank test
+wilcox_test_result <- wilcox.test(correlations_LASSO, correlations_RR, paired = TRUE,
+                                  p.adjust.method = "none")
+p_value <- wilcox_test_result$p.value
+#plot results
+vioplot(combined_data, col = c("cadetblue1", "cadetblue1"),names = c("LASSO", "RR"),
+         ylim = c(0, 1),ylab = "Accuracy")
+# Add text with p-value to the plot
+text(x = 1, y = 0.98, labels = paste("Wilcox test, p =", format(p_value, scientific = TRUE, digits = 4),"***"),
+     col = "black")
+#plot predicted vs observed
+correlations_RR <- numeric(100)
+mean_predictions_per_genotype <- list()
+for (i in 1:100) {
+  # Create an index for splitting the data into training and validation sets
+  index <- createDataPartition(pheno, p = 4/5, list = FALSE)
+  # Split the data into training and validation sets
+  genot_train <- genot.ok[index, ]
+  genot_valid <- genot.ok[-index, ]
+  pheno_train <- pheno[index]
+  pheno_valid <- pheno[-index]
+  genotype_train <- genotype_column[index]
+  genotype_valid <- genotype_column[-index]
+  # Perform cross-validation for ridge regression
+  cv.geno_RR <- cv.glmnet(x = genot_train, y = pheno_train, alpha = 0, family = "gaussian",
+                          nfolds = 5, nlambda = 100, parallel = TRUE)
+  # Fit a GLM with RR regularization using the optimal lambda
+  final_model_RR <- glmnet(x = genot_train, y = pheno_train, alpha = 0,
+                           lambda = cv.geno_RR$lambda.min, family = "gaussian")
+  # Predict values on the validation set
+  predicted_values <- predict(final_model_RR, newx = genot_valid, s = cv.geno_RR$lambda.min)
+  # Calculate the correlation between predicted and observed values
+  correlation <- cor(predicted_values, pheno_valid)
+  # Store the correlation in a vector
+  correlations_RR[i] <- correlation
+  # Calculate mean predictions per genotype
+  results <- data.frame(Observed = pheno_valid, Predicted = predicted_values, Genotype = genotype_valid)
+  mean_predictions_per_genotype[[i]] <- aggregate(Predicted ~ Genotype, data = results, FUN = mean)
+}
+# Plot the distribution of accuracy (correlations)
+mean_accuracy <- mean(correlations_RR)
+print(paste("Mean Accuracy (RR):", mean_accuracy))
+vioplot(correlations_RR, col="cadetblue1", names="Accuracy (RR)",
+        main="Distribution of Accuracy (RR)", ylim = c(0.3, 0.8))
+# Plot mean predictions per genotype
+for (i in 1:100) {
+  points(mean_predictions_per_genotype[[i]]$Predicted, mean_predictions_per_genotype[[i]]$Genotype, col = rgb(0, 0, 1, 0.1), pch = 20)
+}
