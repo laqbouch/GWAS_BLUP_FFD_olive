@@ -1,0 +1,124 @@
+#Title: "Filter of variants"
+#Author: "Laila Aqbouch"
+#contact: "aqbouchlaila@gmail.com"
+#date: 05/12/2023
+#!/bin/bash
+
+#SBATCH -J filtre_vcf                  ### Job name
+#SBATCH -o filtre_vcf."%j".out         ### Standard output
+#SBATCH -e filtre_vcf."%j".err         ### Standard error
+#SBATCH --partition=agap_long  ### Partition
+
+#module purge
+module load vcftools/0.1.16
+module load bcftools/1.11
+
+vcf=$1
+basename=${vcf%%.raw.vcf.gz}
+
+########## Exclude wild populations
+bcftools view -S ^wild_populations.txt $vcf --force-samples > ${basename}_WOGBM.vcf
+bgzip ${basename}_WOGBM.vcf
+
+#####Exclude cuspidata and full genomes picholine3 and picholine marocaine3 and replicates
+     bcftools view -S ^exclude_cuspidata_full_replicates.txt ${basename}_WOGBM.vcf.gz --force-samples > ${basename}_filtered_on_sample.vcf
+
+bgzip  ${basename}_filtered_on_sample.vcf
+
+####################filter of quality per SNP sup 200
+	vcftools --gzvcf ${basename}_filtered_on_sample.vcf.gz --minQ 200 --recode --out ${basename}_filtered_on_sample_SNP_200 
+bgzip ${basename}_filtered_on_sample_SNP_200.recode.vcf
+
+####################Remove_indel
+
+	vcftools --gzvcf ${basename}_filtered_on_sample_SNP_200.recode.vcf.gz --remove-indels --recode --out ${basename}_filtered_on_sample_SNP_200_witout_indel
+
+####################filter_SNP_cluster
+
+	cat ${basename}_filtered_on_sample_SNP_200_witout_indel.recode.vcf | vcf-annotate -f c=3,10 > ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_tag.vcf
+	
+bgzip ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_tag.vcf 
+bgzip ${basename}_filtered_on_sample_SNP_200_witout_indel.recode.vcf
+
+vcftools --gzvcf ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_tag.vcf.gz --remove-filtered SnpCluster \
+    --recode --out ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster 
+
+bgzip ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster.recode.vcf
+
+#####################Remove_min_max_depth_per_site
+	vcftools --gzvcf ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster.recode.vcf.gz --min-meanDP 8 \
+     --max-meanDP 400 --recode --out ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_min_max_dp
+bgzip ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_min_max_dp.recode.vcf
+
+##########set genotypes with DP<8 to missing
+	vcftools --gzvcf ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_min_max_dp.recode.vcf.gz \
+       --minDP 8 --recode --out ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_min_max_dp_DP_GT
+bgzip ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_min_max_dp_DP_GT.recode.vcf
+
+###########filter biallelique
+	vcftools --gzvcf ${basename}_filtered_on_sample_SNP_200_witout_indel_without_cluster_min_max_dp_DP_GT.recode.vcf.gz \
+	--min-alleles 2 --max-alleles 2 --recode --out ${basename}_5filters_biallelique
+
+##########Calculate heterozygosity per SNP 
+	vcftools --vcf ${basename}_5filters_biallelique.recode.vcf --hardy --out ${basename}_5filters_biallelique_het_obs
+
+##########create BED file for heterozygosity sup 0.75 a eliminer
+awk '{print $1,$2,$3}' ${basename}_5filters_biallelique_het_obs.hwe > ${basename}_5filters_biallelique_het_obs_subset_Ho.txt
+
+sed '1d' ${basename}_5filters_biallelique_het_obs_subset_Ho.txt|tr '/' '\t' |awk '{if($3+$4+$5 >0){print $1"\t"$2"\t"$4/($3+$4+$5)}}' \
+	 > ${basename}_5filters_biallelique_het_obs_subset_Ho_het_rate.txt
+
+########## BED of positions to exlude
+cat ${basename}_5filters_biallelique_het_obs_subset_Ho_het_rate.txt | awk '$3>= 0.75' > ${basename}_5filters_biallelique_het_obs_subset_Ho_het_sup_75.txt
+
+awk '{print $1,$2,$2}' ${basename}_5filters_biallelique_het_obs_subset_Ho_het_sup_75.txt > ${basename}_5filters_biallelique_het_obs_subset_Ho_het_sup_75_bed.txt
+
+
+##########filter excces d'hetero sup 0.75
+vcftools --vcf ${basename}_5filters_biallelique.recode.vcf --exclude-bed ${basename}_5filters_biallelique_het_obs_subset_Ho_het_sup_75_bed.txt \
+	 --recode --out ${basename}_5filters_biallelique_het_inf_75 
+
+
+###########zip vcf files
+bgzip ${basename}_5filters_biallelique.recode.vcf
+bgzip ${basename}_5filters_biallelique_het_inf_75.recode.vcf
+
+#######################################################################launch without parallel#####################################################################
+##############merge all chromosomes
+
+##########bcftools concat Oe9_LG{01..23}_5filters_biallelique_het_inf_75_NA_SNP_90.recode.vcf.gz -Oz -o  Oe9_All_CHR.vcf.gz
+###########bcftools concat scaffolds_{00..09}_5filters_biallelique_het_inf_75_NA_SNP_90.recode.vcf.gz -Oz -o  Oe9_All_scaffolds.vcf.gz
+
+bcftools concat -Oz Oe9_LG{01..23}_5filters_biallelique_het_inf_75.recode.vcf.gz \
+	scaffolds_{00..09}_5filters_biallelique_het_inf_75.recode.vcf.gz  -o  Oe9_CHR_scaff_WOGBM.vcf.gz
+
+########calcul of missing per site
+vcftools --gzvcf Oe9_CHR_scaff_WOGBM.vcf.gz --missing-site \
+	--out Oe9_CHR_scaff_WOGBM_NA_per_site
+
+##############Filtre_missing_SNP sur 0.1
+vcftools --gzvcf  Oe9_CHR_scaff_WOGBM.vcf.gz --max-missing 0.9 \
+--recode --out Oe9_CHR_scaff_WOGBM_NA_SNP_90
+bgzip Oe9_CHR_scaff_WOGBM_NA_SNP_90.recode.vcf
+
+############calcul of proportion of missing data per indiv
+
+vcftools --gzvcf Oe9_CHR_scaff_WOGBM_NA_SNP_90.recode.vcf.gz --missing-indv --out Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_per_indiv
+
+##########filter indiv with NA > 25 %
+bcftools view -S ^indiv_to_exclude_NA_sup_25.txt Oe9_CHR_scaff_WOGBM_NA_SNP_90.recode.vcf.gz \
+	--force-samples > Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25.vcf
+bgzip Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25.vcf
+
+##########filter pour Allele count: the number of times that allele appears over all individuals at that site. sup a 1: singleton
+	vcftools --gzvcf Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25.vcf.gz --mac 1 --recode --out Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1
+bgzip Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1.recode.vcf
+
+####count allele freq
+vcftools --gzvcf Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1.recode.vcf.gz --freq2  --out allele_freq_MAC1
+
+### filter for MAF
+vcftools --gzvcf Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1.recode.vcf.gz --maf 0.05 --recode --out Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_MAF_5
+bgzip Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_MAF_5.recode.vcf
+
+
