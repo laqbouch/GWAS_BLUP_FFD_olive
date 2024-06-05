@@ -1,0 +1,161 @@
+library(gplots)
+library(RColorBrewer)
+library(LEA)
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(readxl)
+
+input.file <- "Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_MAF_5_nuclear.ped"
+ped2geno(input.file)
+obj.snmf = snmf(input.file, K = 1:10,project = "new", repetitions = 1,tolerance = 0.00001,entropy = TRUE,ploidy = 2)
+summary(obj.snmf)
+export.snmfProject("Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_MAF_5_nuclear.snmfProject")
+
+#newProject = import.snmfProject("Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_snmfProject.zip")
+obj.snmf = load.snmfProject("Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1.snmfProject") 
+coul <- brewer.pal(5, "Set2") 
+
+indiv_ordered_by_origin <- read_delim("indiv_ordered_by_origin.txt", 
+                                      delim = "\t", escape_double = FALSE, 
+                                      col_names = FALSE, trim_ws = TRUE)
+x1 <- read_delim("sample_info_SNMF_cultivated.txt", 
+                 delim = "\t", escape_double = FALSE, 
+                 col_names = FALSE, trim_ws = TRUE)
+y1 <- read_delim("All_samples_info14_02_23.txt", 
+                 delim = "\t", escape_double = FALSE, 
+                 col_names = T, trim_ws = TRUE)
+sample_info_SNMF_ALL <- merge(x1, y1, by.x = "X1", 
+                       by.y = "cultivars_name_on_cluster", all.x = F, all.y = F)
+sample_info_SNMF_ALL <- sample_info_SNMF_ALL[!duplicated(sample_info_SNMF_ALL), ]
+
+#write.csv(sample_info_SNMF_ALL, "sample_info_SNMF_ALL.csv")
+
+clustering_SSR_2013<- read_excel("table_S1_El_bakkali_2013.xlsx")
+
+
+jpeg("SNMF_cultivated_ce.jpg")
+plot(obj.snmf, cex = 1.2, col = "black", pch = 19)
+dev.off()
+
+
+##### K=3##############
+ce = cross.entropy(obj.snmf, K = 3)
+best3 = which.min(ce)
+####barchart ordered by SNMF for K=3
+
+barchart(obj.snmf, K = 3, run = best3,
+         border = NA, space = 0, col=c("violetred","Blue","green4"),
+         xlab = "Individuals", ylab = "Ancestry proportions",
+         main = "Ancestry_matrix_K3") -> bp
+axis(1, at = 1:length(bp$order),
+     labels = sample_info_SNMF_ALL$origine[bp$order] , las = 3, cex.axis = .4)
+
+###barchart ordered by origin for K=3
+q_mat <- LEA::Q(obj.snmf, K = 3, run = best3) 
+colnames(q_mat) <- paste0("P", 1:3)
+head(q_mat)
+
+new_order <- indiv_ordered_by_origin$X3
+# Define the order of countries
+order <- c("Morocco","Portugal","Spain","Algeria","France","Tunisia","Italy",
+           "Slovenia","Croatia","Greece","Egypt","Cyprus","Lebanon","Syria")
+
+# Map the sample_info_SNMF_ALL$origine[new_order] labels to their corresponding positions in the 'order' vector
+label_positions <- match(sample_info_SNMF_ALL$origine[new_order], order)
+##c("#008080","#DAA520","#404040")
+# Create the plot
+png(file = "Genetic_structure_K3_SNMF1.png", width = 1400, height = 300, units = "px", res = 100)
+
+barplot(t(q_mat[new_order,]), col = c("#004080", "#228B22", "#FF6347"),
+        border = NA, space = 0, xlab = "Individuals", ylab = "Admixture coefficients") -> bp3
+
+# Add legend with specified order
+legend("topright", legend = c("K1", "K2", "K3"), 
+       fill = c("#004080","#228B22","#FF6347"),
+       xpd=TRUE, bty="n", cex=0.8, y.intersp=1, inset=c(-0.03,-0.03))
+
+# Calculate the position of vertical lines based on the order of countries
+lines_pos <- cumsum(table(factor(sample_info_SNMF_ALL$origine[new_order], levels = order))) + 0.5
+
+# Add vertical lines at the calculated positions
+abline(v = lines_pos, col = "black", lty = 1)
+
+# Calculate the midpoints of the vertical lines
+midpoints <- c(12.5/2, lines_pos[-1] - (lines_pos[-1] - lines_pos[-length(lines_pos)]) / 2)
+
+# Add labels in the middle of each vertical line
+text(x = midpoints, y = par("usr")[3] - 0.2, labels = order, srt = 90, adj = c(0.5, 1), xpd = TRUE,
+     col = "black", cex = 0.8, font = 2,srt=-60)
+dev.off()
+#sample_info_SNMF_ALL$origine[59]
+Cultivars_names <- sample_info_SNMF_ALL$X1
+row.names(q_mat) <- Cultivars_names
+write.csv(q_mat, "SNMF_Matrix_K3.csv")
+
+#plot barplot by genetic cluster
+# Calculate the dominant cluster for each individual
+dominant_cluster <- apply(q_mat, 1, which.max)
+
+# Reorder q_mat based on the dominant cluster
+q_mat_reordered <- q_mat[order(dominant_cluster), ]
+
+# Create the barplot with reordered individuals and specified colors
+png(file = "Genetic_structure_K3_SNMF_by_cluster.png", width = 1400, height = 300, units = "px", res = 100)
+
+barplot(t(q_mat_reordered), col = c("#FF6347", "#228B22", "#004080"), # Coral, Green, Dark Blue
+        border = NA, space = 0, xlab = "Individuals", ylab = "Admixture coefficients")
+
+# Add legend with specified order
+legend("topright", legend = c("K1", "K2", "K3"), 
+       fill = c("#004080","#228B22","#FF6347"),
+       xpd=TRUE, bty="n", cex=0.8, y.intersp=1, inset=c(-0.03,-0.03)) 
+dev.off()
+
+#plot genetic cluster orderd by west, centre, east, admixed
+
+q_df <- as.data.frame(q_mat)
+names(q_df) <- c("P1", "P2", "P3")
+
+# Threshold for genetic clusters
+threshold <- 0.7
+
+# Define clusters based on thresholds
+q_df$Cluster <- ifelse(q_df$P1 >= threshold, "P1", 
+                       ifelse(q_df$P2 >= threshold, "P2", 
+                              ifelse(q_df$P3 >= threshold, "P3", "M")))
+
+#Convert Cluster column to factor with specified levels
+q_df$Cluster <- factor(q_df$Cluster, levels = c("P3", "P2", "P1", "M"))
+
+# Order the dataframe by Cluster column
+q_df <- q_df[order(q_df$Cluster), ]
+# Reorder the columns
+q_df_reordered <- q_df %>%
+  select(P3, P2, P1, Cluster)
+# Transpose the dataframe
+q_df_transposed <- t(q_df_reordered)
+colnames(q_df_transposed) <- NULL
+# Remove column names
+# Plotting
+png(file = "Genetic_structure_K3_brut_3.png", width = 1400, height = 300, units = "px", res = 100)
+
+barplot(q_df_transposed, col = c("#FF6347", "#228B22", "#004080"), 
+        border = NA, space = 0, xlab = "Individuals", ylab = "Admixture coefficients")
+lines_pos <- cumsum(table(q_df$Cluster)) 
+
+# Add vertical lines at the calculated positions
+abline(v = lines_pos, col = "black", lty = 1)
+
+# Calculate the midpoints of the vertical lines
+midpoints <- c(71/2, lines_pos[-1] - (lines_pos[-1] - lines_pos[-length(lines_pos)]) / 2)
+genetic_cluster <- c("C3","C2","C1","M")
+# Add labels in the middle of each vertical line
+text(x = midpoints, y = par("usr")[3] - 0.05, labels = genetic_cluster , srt = 90, adj = c(0.5, 1), xpd = TRUE,
+     col = "black", cex = 0.8, font = 2,srt=-60)
+legend("topright", legend = c("K1", "K2", "K3"), 
+       fill = c("#004080","#228B22","#FF6347"),
+       xpd=TRUE, bty="n", cex=0.8, y.intersp=1, inset=c(-0.03,-0.03)) 
+dev.off()
+
+
